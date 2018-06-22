@@ -1,14 +1,19 @@
-package evNotifier
+package main
 
 import (
+	"bytes"
+	"fmt"
+	"io"
 	"log"
 	"net"
+	"sync"
 	"time"
 )
 
-func main() {
+const BufSize = 4096
 
-	ln, err := net.Listen("unix", "/tmp/evsock")
+func doListen(path string, handler func(conn net.Conn)) {
+	ln, err := net.Listen("unix", path)
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -17,31 +22,208 @@ func main() {
 		if err != nil {
 			log.Println("Accept failed:", err)
 		}
-		go handleConnection(conn)
+		go handler(conn)
+	}
+
+}
+
+func listenHttp() {
+	doListen("/tmp/httpsock", handleHttp)
+}
+func listenEv() {
+	doListen("/tmp/evsock", handleEvent)
+}
+func main() {
+	go listenEv()
+	listenHttp()
+}
+
+var broadcastChan = make(chan struct{})
+
+func doBroadcast() {
+	close(broadcastChan)
+	broadcastChan = make(chan struct{})
+}
+func handleEvent(conn net.Conn) {
+	conn.SetReadDeadline(time.Now().Add(time.Second * 5))
+	var b [1]byte
+	n, err := conn.Read(b[:])
+	if err != nil || n != 1 {
+		log.Println("Failed to candle conn:", err)
+		return
+	}
+	doBroadcast()
+}
+
+const (
+	statusReady     = 0
+	statusInProcess = 1
+	statusClose     = 2
+	statusClosed    = 3
+)
+
+type connCtx struct {
+	buf []byte
+	cnt int
+
+	conn   net.Conn
+	host   string
+	mu     sync.Mutex
+	status uint32
+}
+
+func (ctx *connCtx) sendError(errStr string) {
+	log.Println(errStr)
+	ctx.conn.Write([]byte(fmt.Sprintf("HTTP/1.1 %s\r\nConnection: close\r\n\r\n", errStr)))
+	ctx.conn.Close()
+	ctx.status = statusClosed
+}
+func (ctx *connCtx) sendBadRequest() {
+	ctx.sendError("400 Bad Request")
+}
+func (ctx *connCtx) ErrPipeline() {
+	log.Println("Client tries to pipeline requests! Forcing Connection: close")
+	ctx.status = statusClose
+}
+
+var (
+	httpSig  = []byte("HTTP/1.1")
+	httpGet  = []byte("GET ")
+	bNewLine = []byte{10}
+	bColon   = []byte(":")
+)
+
+func (ctx *connCtx) parseHeaders() {
+	if ctx.cnt >= BufSize {
+		log.Println("Buffer overflow!")
+		ctx.sendError("500 Internal Server Error")
+		return
+	}
+	buf := ctx.buf[:ctx.cnt]
+	pos := bytes.IndexByte(buf, 10)
+	if pos == -1 {
+		return
+	}
+	if pos < 14 || !bytes.Equal(buf[pos-len(httpSig):pos], httpSig) {
+		ctx.sendBadRequest()
+		return
+	}
+	if !bytes.Equal(buf[:len(httpGet)], httpGet) {
+		ctx.sendError("405 Method Not Allowed")
+	}
+	lines := bytes.Split(buf[pos+1:], bNewLine)
+	if len(lines) == 0 {
+		return
+	}
+	if len(bytes.TrimSpace(lines[len(lines)-1])) == 0 {
+		lines = lines[:len(lines)-1]
+	}
+	var end, keepalive bool
+	for _, line := range lines {
+		line = bytes.TrimSpace(line)
+		if end && len(line) > 0 {
+			ctx.ErrPipeline()
+			break
+		}
+		if len(line) == 0 {
+			end = true
+			continue
+		}
+		kv := bytes.SplitN(line, bColon, 2)
+		if len(kv) != 2 {
+			ctx.sendBadRequest()
+			return
+		}
+		switch string(bytes.ToLower(bytes.TrimSpace(kv[0]))) {
+		case "host":
+			ctx.host = string(kv[1])
+		case "connection":
+			if string(bytes.ToLower(bytes.TrimSpace(kv[0]))) == "keep-alive" {
+				keepalive = true
+			}
+		}
+	}
+	if !end {
+		return
+	}
+	if keepalive {
+		ctx.status = statusInProcess
+	} else {
+		ctx.status = statusClose
+	}
+	ctx.conn.SetReadDeadline(time.Time{})
+	go ctx.waitForNotify()
+}
+func (ctx *connCtx) readAction() bool {
+	ctx.mu.Lock()
+	defer ctx.mu.Unlock()
+	switch ctx.status {
+	case statusReady:
+		ctx.parseHeaders()
+	case statusInProcess:
+		ctx.ErrPipeline()
+	}
+	if ctx.status != statusReady {
+		ctx.cnt = 0
+	}
+	return ctx.status == statusClosed
+}
+
+func handleHttp(conn net.Conn) {
+	conn.SetReadDeadline(time.Now().Add(time.Second * 20))
+	ctx := connCtx{
+		conn: conn,
+		host: "localhost",
+		buf:  make([]byte, BufSize),
+	}
+	for {
+		n, err := conn.Read(ctx.buf[ctx.cnt:])
+		if err == io.EOF {
+			ctx.mu.Lock()
+			if ctx.status == statusInProcess {
+				doBroadcast()
+			}
+			ctx.mu.Unlock()
+			return
+		}
+		if err != nil {
+			log.Println("Connection error:", err)
+			conn.Close()
+			return
+		}
+		ctx.cnt += n
+		if ctx.readAction() {
+			return
+		}
 	}
 }
 
-var ch = make(chan struct{})
-
-func handleConnection(conn net.Conn) {
-	conn.SetReadDeadline(time.Now().Add(time.Second * 2))
-	var b [1]byte
-	n, err := conn.Read(b[:])
-	if err != nil {
-		log.Println("Failed to candle conn:", err)
+func (ctx *connCtx) waitForNotify() {
+	select {
+	case <-broadcastChan:
+	case <-time.After(time.Second * 60):
 	}
-	if n == 0 {
-		log.Println("Nothing was sent to us")
+	ctx.mu.Lock()
+	defer ctx.mu.Unlock()
+	if ctx.status == statusClosed {
+		return
 	}
-	switch b[0] {
-	case byte('w'):
-		select {
-		case <-ch:
-		case <-time.After(time.Second * 20):
-		}
-	case byte('n'):
-		close(ch)
-		ch = make(chan struct{})
+	var conn string
+	if ctx.status == statusClose {
+		conn = "close"
+	} else {
+		conn = "keep-alive"
 	}
-
+	bs := []byte(fmt.Sprintf("HTTP/1.1 204 No Content\r\nHost: %s\r\nConnection: %s\r\n\r\n", ctx.host, conn))
+	n, err := ctx.conn.Write(bs)
+	if err != nil || n < len(bs) {
+		log.Println("Write error", err)
+		ctx.status = statusClose
+	}
+	if ctx.status == statusClose {
+		ctx.conn.Close()
+		ctx.status = statusClosed
+	} else {
+		ctx.status = statusReady
+	}
 }
