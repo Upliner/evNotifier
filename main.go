@@ -6,6 +6,7 @@ import (
 	"io"
 	"log"
 	"net"
+	"os"
 	"sync"
 	"time"
 )
@@ -13,6 +14,7 @@ import (
 const BufSize = 4096
 
 func doListen(path string, handler func(conn net.Conn)) {
+	os.Remove(path)
 	ln, err := net.Listen("unix", path)
 	if err != nil {
 		log.Fatal(err)
@@ -53,6 +55,7 @@ func handleEvent(conn net.Conn) {
 		return
 	}
 	doBroadcast()
+	conn.Close()
 }
 
 const (
@@ -138,7 +141,7 @@ func (ctx *connCtx) parseHeaders() {
 		case "host":
 			ctx.host = string(kv[1])
 		case "connection":
-			if string(bytes.ToLower(bytes.TrimSpace(kv[0]))) == "keep-alive" {
+			if string(bytes.ToLower(bytes.TrimSpace(kv[1]))) == "keep-alive" {
 				keepalive = true
 			}
 		}
@@ -178,17 +181,18 @@ func handleHttp(conn net.Conn) {
 	}
 	for {
 		n, err := conn.Read(ctx.buf[ctx.cnt:])
-		if err == io.EOF {
-			ctx.mu.Lock()
-			if ctx.status == statusInProcess {
-				doBroadcast()
-			}
-			ctx.mu.Unlock()
-			return
-		}
 		if err != nil {
-			log.Println("Connection error:", err)
+			ctx.mu.Lock()
+			defer ctx.mu.Unlock()
+			if err == io.EOF {
+				if ctx.status == statusInProcess || ctx.status == statusClose {
+					doBroadcast()
+				}
+			} else if ctx.status != statusClosed {
+				log.Println("Connection error:", err)
+			}
 			conn.Close()
+			ctx.status = statusClosed
 			return
 		}
 		ctx.cnt += n
