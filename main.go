@@ -60,7 +60,7 @@ func handleEvent(conn net.Conn) {
 
 const (
 	statusReady     = 0
-	statusInProcess = 1
+	statusKeepAlive = 1
 	statusClose     = 2
 	statusClosed    = 3
 )
@@ -150,7 +150,7 @@ func (ctx *connCtx) parseHeaders() {
 		return
 	}
 	if keepalive {
-		ctx.status = statusInProcess
+		ctx.status = statusKeepAlive
 	} else {
 		ctx.status = statusClose
 	}
@@ -163,7 +163,7 @@ func (ctx *connCtx) readAction() bool {
 	switch ctx.status {
 	case statusReady:
 		ctx.parseHeaders()
-	case statusInProcess:
+	case statusKeepAlive:
 		ctx.ErrPipeline()
 	}
 	if ctx.status != statusReady {
@@ -185,7 +185,7 @@ func handleHttp(conn net.Conn) {
 			ctx.mu.Lock()
 			defer ctx.mu.Unlock()
 			if err == io.EOF {
-				if ctx.status == statusInProcess || ctx.status == statusClose {
+				if ctx.status == statusKeepAlive || ctx.status == statusClose {
 					doBroadcast()
 				}
 			} else if ctx.status != statusClosed {
