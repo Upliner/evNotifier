@@ -121,7 +121,7 @@ func (ctx *connCtx) parseHeaders() {
 	if len(bytes.TrimSpace(lines[len(lines)-1])) == 0 {
 		lines = lines[:len(lines)-1]
 	}
-	var end, keepalive bool
+	var end, keepalive, err bool
 	for _, line := range lines {
 		line = bytes.TrimSpace(line)
 		if end && len(line) > 0 {
@@ -134,12 +134,12 @@ func (ctx *connCtx) parseHeaders() {
 		}
 		kv := bytes.SplitN(line, bColon, 2)
 		if len(kv) != 2 {
-			ctx.sendBadRequest()
-			return
+			err = true
+			continue
 		}
 		switch string(bytes.ToLower(bytes.TrimSpace(kv[0]))) {
 		case "host":
-			ctx.host = string(bytes.TrimSpace(kv[1])))
+			ctx.host = string(bytes.TrimSpace(kv[1]))
 		case "connection":
 			if string(bytes.ToLower(bytes.TrimSpace(kv[1]))) == "keep-alive" {
 				keepalive = true
@@ -147,6 +147,10 @@ func (ctx *connCtx) parseHeaders() {
 		}
 	}
 	if !end {
+		return
+	}
+	if err {
+		ctx.sendBadRequest()
 		return
 	}
 	if keepalive {
