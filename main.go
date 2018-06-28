@@ -139,7 +139,7 @@ func (ctx *connCtx) parseHeaders() {
 		}
 		switch string(bytes.ToLower(bytes.TrimSpace(kv[0]))) {
 		case "host":
-			ctx.host = string(kv[1])
+			ctx.host = string(bytes.TrimSpace(kv[1])))
 		case "connection":
 			if string(bytes.ToLower(bytes.TrimSpace(kv[1]))) == "keep-alive" {
 				keepalive = true
