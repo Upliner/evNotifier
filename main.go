@@ -107,7 +107,8 @@ func (ctx *connCtx) parseHeaders() {
 	if pos == -1 {
 		return
 	}
-	if pos < 14 || !bytes.Equal(buf[pos-len(httpSig):pos], httpSig) {
+	line := bytes.TrimSpace(buf[:pos])
+	if pos < 14 || !bytes.Equal(line[len(line)-len(httpSig):], httpSig) {
 		ctx.sendBadRequest()
 		return
 	}
