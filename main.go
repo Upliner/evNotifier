@@ -39,6 +39,7 @@ func listenEv() {
 var evLog *os.File
 
 func main() {
+	et.Stop()
 	var err error
 	evLog, err = os.Create("/tmp/evlog")
 	if err != nil {
@@ -49,11 +50,21 @@ func main() {
 }
 
 var broadcastChan = make(chan struct{})
+var et = time.AfterFunc(time.Hour, doEcho)
 
 func doBroadcast() {
 	close(broadcastChan)
 	broadcastChan = make(chan struct{})
 }
+func broadcastWithEcho() {
+	doBroadcast()
+	et.Reset(time.Second * 10)
+}
+func doEcho() {
+	evLog.Write([]byte{byte('e')})
+	doBroadcast()
+}
+
 func handleEvent(conn net.Conn) {
 	conn.SetReadDeadline(time.Now().Add(time.Second * 5))
 	var b [1]byte
@@ -66,7 +77,7 @@ func handleEvent(conn net.Conn) {
 		return
 	}
 	evLog.Write(b[:])
-	doBroadcast()
+	broadcastWithEcho()
 	conn.Close()
 }
 
