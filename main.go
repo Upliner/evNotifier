@@ -35,7 +35,15 @@ func listenHttp() {
 func listenEv() {
 	doListen("/tmp/evsock", handleEvent)
 }
+
+var evLog *os.File
+
 func main() {
+	var err error
+	evLog, err = os.Create("/tmp/evlog")
+	if err != nil {
+		log.Fatal(err)
+	}
 	go listenEv()
 	listenHttp()
 }
@@ -50,10 +58,14 @@ func handleEvent(conn net.Conn) {
 	conn.SetReadDeadline(time.Now().Add(time.Second * 5))
 	var b [1]byte
 	n, err := conn.Read(b[:])
-	if err != nil || n != 1 {
-		log.Println("Failed to candle conn:", err)
+	if err == io.EOF {
 		return
 	}
+	if err != nil || n != 1 {
+		log.Println("Failed to handle conn:", err)
+		return
+	}
+	evLog.Write(b[:])
 	doBroadcast()
 	conn.Close()
 }
