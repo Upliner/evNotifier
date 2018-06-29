@@ -203,6 +203,7 @@ func handleHttp(conn net.Conn) {
 			defer ctx.mu.Unlock()
 			if err == io.EOF {
 				if ctx.status == statusKeepAlive || ctx.status == statusClose {
+					evLog.Write([]byte{0xff})
 					doBroadcast()
 				}
 			} else if ctx.status != statusClosed {
